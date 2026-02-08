@@ -511,3 +511,61 @@ def clear_savings_goal_v2():
         conn.execute(text("DELETE FROM savings_overrides_v2"))
         conn.execute(text("DELETE FROM savings_tx_link_v2"))
     _invalidate_cache()
+
+def create_desafio_transaction(date_, n, amount):
+    """
+    Cria (ou reutiliza) um lançamento de entrada vinculado ao depósito n do desafio.
+    Retorna o tx_id.
+    """
+    n = int(n)
+    with ENGINE.begin() as conn:
+        row = conn.execute(text("SELECT tx_id FROM savings_tx_link_v2 WHERE n=:n"), {"n": n}).fetchone()
+        if row and row[0]:
+            return int(row[0])
+
+        # Insere transação
+        conn.execute(
+            text("""
+            INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
+            VALUES (:date, :desc, 'entrada', :amount, 'Desafio', :paid, :created_at)
+            """),
+            {
+                "date": str(date_),
+                "desc": f"Desafio - Depósito #{n}",
+                "amount": float(amount),
+                "paid": _paid_to_db(True),
+                "created_at": _now_sqlite_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
+            },
+        )
+
+        # Pega id gerado (Postgres vs SQLite)
+        if DB_KIND == "postgres":
+            tx_id = conn.execute(text("SELECT currval(pg_get_serial_sequence('transactions','id'))")).scalar()
+        else:
+            tx_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+
+        # Linka n -> tx_id
+        conn.execute(
+            text("""
+            INSERT INTO savings_tx_link_v2 (n, tx_id)
+            VALUES (:n, :tx_id)
+            ON CONFLICT(n) DO UPDATE SET tx_id=excluded.tx_id
+            """),
+            {"n": n, "tx_id": int(tx_id)},
+        )
+
+    _invalidate_cache()
+    return int(tx_id)
+
+
+def delete_desafio_transaction(n):
+    """
+    Remove o vínculo n->tx_id e apaga a transação se existir.
+    """
+    n = int(n)
+    with ENGINE.begin() as conn:
+        row = conn.execute(text("SELECT tx_id FROM savings_tx_link_v2 WHERE n=:n"), {"n": n}).fetchone()
+        if row and row[0]:
+            conn.execute(text("DELETE FROM transactions WHERE id=:id"), {"id": int(row[0])})
+        conn.execute(text("DELETE FROM savings_tx_link_v2 WHERE n=:n"), {"n": n})
+    _invalidate_cache()
