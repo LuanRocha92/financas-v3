@@ -15,6 +15,7 @@ def _make_engine():
             DATABASE_URL,
             pool_pre_ping=True,
             pool_recycle=300,
+            connect_args={"sslmode": "require"},
             future=True,
         ), "postgres"
     db_path = os.environ.get("FIN_DB_PATH", "financas.db")
