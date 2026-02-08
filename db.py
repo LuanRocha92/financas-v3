@@ -1,15 +1,19 @@
+# db.py
 import os
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
-# ==========================================
-# ENGINE (Supabase Postgres se tiver DATABASE_URL)
-# ==========================================
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+# =========================
+# DATABASE URL (Neon / qualquer Postgres)
+# =========================
+DATABASE_URL = (
+    os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")
+).strip()
 
 def _make_engine():
+    # Postgres (Neon etc.)
     if DATABASE_URL:
         return create_engine(
             DATABASE_URL,
@@ -18,6 +22,8 @@ def _make_engine():
             connect_args={"sslmode": "require"},
             future=True,
         ), "postgres"
+
+    # Fallback local: SQLite
     db_path = os.environ.get("FIN_DB_PATH", "financas.db")
     return create_engine(f"sqlite:///{db_path}", future=True), "sqlite"
 
@@ -26,7 +32,7 @@ ENGINE, DB_KIND = _make_engine()
 def db_kind():
     return DB_KIND
 
-def _now_sqlite_iso():
+def _now_iso():
     return datetime.utcnow().isoformat(timespec="seconds")
 
 def _invalidate_cache():
@@ -61,10 +67,9 @@ def _paid_from_db(v):
         return 1 if bool(v) else 0
     return int(v) if v is not None else 0
 
-
-# ==========================================
+# =========================
 # INIT DB
-# ==========================================
+# =========================
 def init_db():
     with ENGINE.begin() as conn:
         if DB_KIND == "postgres":
@@ -138,7 +143,6 @@ def init_db():
                 tx_id BIGINT
             );
             """))
-
         else:
             conn.execute(text("""
             CREATE TABLE IF NOT EXISTS transactions (
@@ -210,10 +214,9 @@ def init_db():
             );
             """))
 
-
-# ==========================================
+# =========================
 # TRANSACTIONS
-# ==========================================
+# =========================
 def add_transaction(date_, description, ttype, amount, category, paid):
     ttype = str(ttype).strip().lower()
     category = (str(category).strip() or "Outros")
@@ -231,7 +234,7 @@ def add_transaction(date_, description, ttype, amount, category, paid):
                 "amount": float(amount),
                 "category": category,
                 "paid": _paid_to_db(paid),
-                "created_at": _now_sqlite_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
+                "created_at": _now_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
             },
         )
     _invalidate_cache()
@@ -301,10 +304,9 @@ def update_transactions_bulk(df_updates):
             )
     _invalidate_cache()
 
-
-# ==========================================
+# =========================
 # AJUSTES DO FLUXO
-# ==========================================
+# =========================
 def add_cashflow_adjustment(date_, amount, description=None):
     with ENGINE.begin() as conn:
         conn.execute(
@@ -316,7 +318,7 @@ def add_cashflow_adjustment(date_, amount, description=None):
                 "date": str(date_),
                 "amount": float(amount),
                 "description": (description or "").strip(),
-                "created_at": _now_sqlite_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
+                "created_at": _now_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
             },
         )
     _invalidate_cache()
@@ -347,10 +349,9 @@ def delete_cashflow_adjustment(adj_id):
         conn.execute(text("DELETE FROM cashflow_adjustments WHERE id = :id"), {"id": adj_id})
     _invalidate_cache()
 
-
-# ==========================================
+# =========================
 # DÍVIDAS
-# ==========================================
+# =========================
 def add_debt(credor, descricao, valor, vencimento, prioridade):
     with ENGINE.begin() as conn:
         conn.execute(
@@ -365,7 +366,7 @@ def add_debt(credor, descricao, valor, vencimento, prioridade):
                 "venc": None if not vencimento else str(vencimento),
                 "prio": int(prioridade),
                 "paid": _paid_to_db(False),
-                "created_at": _now_sqlite_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
+                "created_at": _now_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
             },
         )
     _invalidate_cache()
@@ -376,15 +377,15 @@ def fetch_debts(show_quitadas=False):
     SELECT id, creditor, description, amount, due_date, priority, paid, created_at
       FROM debts
     """
+    params = {}
     if not show_quitadas:
         q += " WHERE paid = :p0"
+        params["p0"] = _paid_to_db(False)
+
     q += " ORDER BY priority ASC, COALESCE(due_date,'9999-12-31') ASC, id DESC"
 
     with ENGINE.connect() as conn:
-        if not show_quitadas:
-            df = pd.read_sql(text(q), conn, params={"p0": _paid_to_db(False)})
-        else:
-            df = pd.read_sql(text(q), conn)
+        df = pd.read_sql(text(q), conn, params=params)
 
     if df.empty:
         return pd.DataFrame(columns=["id","creditor","description","amount","due_date","priority","paid","created_at"])
@@ -410,10 +411,9 @@ def delete_debt(debt_id):
         conn.execute(text("DELETE FROM debts WHERE id = :id"), {"id": debt_id})
     _invalidate_cache()
 
-
-# ==========================================
+# =========================
 # DESAFIO v2
-# ==========================================
+# =========================
 def _min_n_for_target(target):
     target = float(target)
     if target <= 0:
@@ -454,7 +454,7 @@ def get_savings_goal_v2():
         row = conn.execute(text("SELECT target_amount, due_date, n_deposits FROM savings_goal_v2 WHERE id=1")).fetchone()
     if not row:
         return None, None, None
-    return row[0], row[1], row[2]
+    return row[0], (None if row[1] is None else str(row[1])), row[2]
 
 @st.cache_data(show_spinner=False, ttl=10)
 def fetch_savings_deposits_v2_with_amount():
@@ -506,7 +506,10 @@ def set_savings_override_v2(n, amount):
 
 def reset_savings_marks_v2():
     with ENGINE.begin() as conn:
-        conn.execute(text("UPDATE savings_deposits_v2 SET done = :d"), {"d": _paid_to_db(False)})
+        if DB_KIND == "postgres":
+            conn.execute(text("UPDATE savings_deposits_v2 SET done = FALSE"))
+        else:
+            conn.execute(text("UPDATE savings_deposits_v2 SET done = 0"))
         conn.execute(text("DELETE FROM savings_tx_link_v2"))
     _invalidate_cache()
 
@@ -518,47 +521,22 @@ def clear_savings_goal_v2():
         conn.execute(text("DELETE FROM savings_tx_link_v2"))
     _invalidate_cache()
 
-
 def create_desafio_transaction(date_, n, amount):
-    """
-    Postgres: usa RETURNING id (mais seguro)
-    SQLite: usa last_insert_rowid()
-    """
     n = int(n)
     with ENGINE.begin() as conn:
         row = conn.execute(text("SELECT tx_id FROM savings_tx_link_v2 WHERE n=:n"), {"n": n}).fetchone()
         if row and row[0]:
             return int(row[0])
 
-        if DB_KIND == "postgres":
-            tx_id = conn.execute(
-                text("""
-                INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
-                VALUES (:date, :desc, 'entrada', :amount, 'Desafio', :paid, NOW())
-                RETURNING id
-                """),
-                {
-                    "date": str(date_),
-                    "desc": f"Desafio - Depósito #{n}",
-                    "amount": float(amount),
-                    "paid": True,
-                },
-            ).scalar()
-        else:
-            conn.execute(
-                text("""
-                INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
-                VALUES (:date, :desc, 'entrada', :amount, 'Desafio', :paid, :created_at)
-                """),
-                {
-                    "date": str(date_),
-                    "desc": f"Desafio - Depósito #{n}",
-                    "amount": float(amount),
-                    "paid": 1,
-                    "created_at": _now_sqlite_iso(),
-                },
-            )
-            tx_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+        conn.execute(
+            text("""
+            INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
+            VALUES (:date, :desc, 'entrada', :amount, 'Desafio', :paid, NOW())
+            """),
+            {"date": str(date_), "desc": f"Desafio - Depósito #{n}", "amount": float(amount), "paid": True},
+        )
+
+        tx_id = conn.execute(text("SELECT currval(pg_get_serial_sequence('transactions','id'))")).scalar()
 
         conn.execute(
             text("""
@@ -571,7 +549,6 @@ def create_desafio_transaction(date_, n, amount):
 
     _invalidate_cache()
     return int(tx_id)
-
 
 def delete_desafio_transaction(n):
     n = int(n)

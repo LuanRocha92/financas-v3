@@ -17,6 +17,11 @@ from desafio import render_desafio
 st.set_page_config(page_title="Finanças", page_icon="💰", layout="wide")
 
 # DB init (Supabase/Postgres se tiver DATABASE_URL)
+
+import os
+st.sidebar.caption("DATABASE_URL set? " + ("SIM" if os.getenv("DATABASE_URL") else "NÃO"))
+
+
 init_db()
 ok, msg = ping_db()
 if ok:
