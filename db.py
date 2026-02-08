@@ -4,6 +4,17 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL não definida. App não pode usar SQLite em produção.")
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+)
+
 DB_PATH = os.environ.get("FIN_DB_PATH", "financas.db")
 ENGINE = create_engine(f"sqlite:///{DB_PATH}", future=True)
 
