@@ -1,0 +1,5 @@
+streamlit
+pandas
+sqlalchemy>=2.0
+psycopg2-binary
+altair<5
