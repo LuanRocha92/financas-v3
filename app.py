@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from db import (
     init_db,
     ping_db,
+    db_kind,
     add_transaction, fetch_transactions, delete_transaction, update_transactions_bulk,
     add_cashflow_adjustment, fetch_cashflow_adjustments, delete_cashflow_adjustment,
     add_debt, fetch_debts, mark_debt_paid, delete_debt,
@@ -15,15 +16,16 @@ from desafio import render_desafio
 
 st.set_page_config(page_title="Finanças", page_icon="💰", layout="wide")
 
-# DB init (SQLite)
+# DB init (Supabase/Postgres se tiver DATABASE_URL)
 init_db()
 ok, msg = ping_db()
 if ok:
-    st.sidebar.success("✅ Banco conectado (SQLite)")
+    st.sidebar.success(f"✅ Banco conectado ({db_kind()})")
 else:
-    st.sidebar.error("❌ SQLite não conectou")
+    st.sidebar.error("❌ Banco não conectou")
     st.sidebar.caption(msg)
     st.stop()
+
 
 def _style_pos_neg(v: float):
     try:
@@ -31,6 +33,7 @@ def _style_pos_neg(v: float):
     except Exception:
         v = 0.0
     return "color:#ff4d4f; font-weight:700;" if v < 0 else "color:#22c55e; font-weight:700;"
+
 
 # Sidebar
 st.sidebar.title("📌 Menu")
@@ -291,7 +294,7 @@ elif pagina == "📆 Fluxo de Caixa":
             view = adj.copy()
             view["date"] = pd.to_datetime(view["date"]).dt.strftime("%d/%m/%Y")
             view["amount"] = view["amount"].apply(fmt_brl)
-            view = view[["id","date","amount","description"]]
+            view = view[["id", "date", "amount", "description"]]
             view.columns = ["ID", "Data", "Valor", "Descrição"]
             st.dataframe(view, use_container_width=True, hide_index=True)
 

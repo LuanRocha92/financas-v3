@@ -4,25 +4,31 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# ==========================================
+# ENGINE (Supabase Postgres se tiver DATABASE_URL)
+# ==========================================
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL não definida. App não pode usar SQLite em produção.")
+def _make_engine():
+    if DATABASE_URL:
+        return create_engine(
+            DATABASE_URL,
+            pool_pre_ping=True,
+            pool_recycle=300,
+            future=True,
+        ), "postgres"
+    db_path = os.environ.get("FIN_DB_PATH", "financas.db")
+    return create_engine(f"sqlite:///{db_path}", future=True), "sqlite"
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=300,
-)
+ENGINE, DB_KIND = _make_engine()
 
-DB_PATH = os.environ.get("FIN_DB_PATH", "financas.db")
-ENGINE = create_engine(f"sqlite:///{DB_PATH}", future=True)
+def db_kind():
+    return DB_KIND
 
-def _now_iso():
+def _now_sqlite_iso():
     return datetime.utcnow().isoformat(timespec="seconds")
 
 def _invalidate_cache():
-    # se cache ainda não existir, ignora
     for fn in [
         "fetch_transactions",
         "fetch_cashflow_adjustments",
@@ -43,82 +49,168 @@ def ping_db():
     except Exception as e:
         return False, str(e)
 
+# paid compat
+def _paid_to_db(paid):
+    if DB_KIND == "postgres":
+        return bool(paid)
+    return 1 if bool(paid) else 0
+
+def _paid_from_db(v):
+    if DB_KIND == "postgres":
+        return 1 if bool(v) else 0
+    return int(v) if v is not None else 0
+
+# ==========================================
+# INIT DB
+# ==========================================
 def init_db():
     with ENGINE.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            description TEXT NOT NULL,
-            type TEXT NOT NULL CHECK(type IN ('entrada','saida')),
-            amount REAL NOT NULL,
-            category TEXT NOT NULL,
-            paid INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        );
-        """))
+        if DB_KIND == "postgres":
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id BIGSERIAL PRIMARY KEY,
+                date DATE NOT NULL,
+                description TEXT NOT NULL,
+                type TEXT NOT NULL CHECK (type IN ('entrada','saida')),
+                amount NUMERIC NOT NULL,
+                category TEXT NOT NULL,
+                paid BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """))
 
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS cashflow_adjustments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            amount REAL NOT NULL,
-            description TEXT DEFAULT '',
-            created_at TEXT NOT NULL
-        );
-        """))
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cashflow_adjustments (
+                id BIGSERIAL PRIMARY KEY,
+                date DATE NOT NULL,
+                amount NUMERIC NOT NULL,
+                description TEXT DEFAULT '',
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """))
 
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS debts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            creditor TEXT NOT NULL,
-            description TEXT NOT NULL,
-            amount REAL NOT NULL,
-            due_date TEXT,
-            priority INTEGER NOT NULL DEFAULT 1,
-            paid INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        );
-        """))
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS debts (
+                id BIGSERIAL PRIMARY KEY,
+                creditor TEXT NOT NULL,
+                description TEXT NOT NULL,
+                amount NUMERIC NOT NULL,
+                due_date DATE,
+                priority INTEGER NOT NULL DEFAULT 1,
+                paid BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+            """))
 
-        # Desafio v2
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS savings_goal_v2 (
-            id INTEGER PRIMARY KEY CHECK(id = 1),
-            target_amount REAL,
-            due_date TEXT,
-            n_deposits INTEGER
-        );
-        """))
-        conn.execute(text("""
-        INSERT OR IGNORE INTO savings_goal_v2 (id, target_amount, due_date, n_deposits)
-        VALUES (1, NULL, NULL, NULL);
-        """))
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_goal_v2 (
+                id INTEGER PRIMARY KEY,
+                target_amount NUMERIC,
+                due_date DATE,
+                n_deposits INTEGER
+            );
+            """))
+            conn.execute(text("""
+            INSERT INTO savings_goal_v2 (id, target_amount, due_date, n_deposits)
+            VALUES (1, NULL, NULL, NULL)
+            ON CONFLICT (id) DO NOTHING;
+            """))
 
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS savings_deposits_v2 (
-            n INTEGER PRIMARY KEY,
-            done INTEGER NOT NULL DEFAULT 0
-        );
-        """))
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_deposits_v2 (
+                n INTEGER PRIMARY KEY,
+                done BOOLEAN NOT NULL DEFAULT FALSE
+            );
+            """))
 
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS savings_overrides_v2 (
-            n INTEGER PRIMARY KEY,
-            amount REAL
-        );
-        """))
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_overrides_v2 (
+                n INTEGER PRIMARY KEY,
+                amount NUMERIC
+            );
+            """))
 
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS savings_tx_link_v2 (
-            n INTEGER PRIMARY KEY,
-            tx_id INTEGER
-        );
-        """))
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_tx_link_v2 (
+                n INTEGER PRIMARY KEY,
+                tx_id BIGINT
+            );
+            """))
 
-# =========================
+        else:
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                description TEXT NOT NULL,
+                type TEXT NOT NULL CHECK(type IN ('entrada','saida')),
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                paid INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            """))
+
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cashflow_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                description TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            """))
+
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS debts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                creditor TEXT NOT NULL,
+                description TEXT NOT NULL,
+                amount REAL NOT NULL,
+                due_date TEXT,
+                priority INTEGER NOT NULL DEFAULT 1,
+                paid INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            """))
+
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_goal_v2 (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                target_amount REAL,
+                due_date TEXT,
+                n_deposits INTEGER
+            );
+            """))
+            conn.execute(text("""
+            INSERT OR IGNORE INTO savings_goal_v2 (id, target_amount, due_date, n_deposits)
+            VALUES (1, NULL, NULL, NULL);
+            """))
+
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_deposits_v2 (
+                n INTEGER PRIMARY KEY,
+                done INTEGER NOT NULL DEFAULT 0
+            );
+            """))
+
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_overrides_v2 (
+                n INTEGER PRIMARY KEY,
+                amount REAL
+            );
+            """))
+
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS savings_tx_link_v2 (
+                n INTEGER PRIMARY KEY,
+                tx_id INTEGER
+            );
+            """))
+
+# ==========================================
 # TRANSACTIONS
-# =========================
+# ==========================================
 def add_transaction(date_, description, ttype, amount, category, paid):
     ttype = str(ttype).strip().lower()
     category = (str(category).strip() or "Outros")
@@ -135,8 +227,8 @@ def add_transaction(date_, description, ttype, amount, category, paid):
                 "type": ttype,
                 "amount": float(amount),
                 "category": category,
-                "paid": int(paid),
-                "created_at": _now_iso(),
+                "paid": _paid_to_db(paid),
+                "created_at": _now_sqlite_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
             },
         )
     _invalidate_cache()
@@ -159,7 +251,7 @@ def fetch_transactions(date_start=None, date_end=None):
     if df.empty:
         return pd.DataFrame(columns=["id","date","description","type","amount","category","paid"])
 
-    df["paid"] = pd.to_numeric(df["paid"], errors="coerce").fillna(0).astype(int)
+    df["paid"] = df["paid"].apply(_paid_from_db)
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
     df["type"] = df["type"].astype(str).str.strip().str.lower()
     df["category"] = df["category"].astype(str).fillna("Outros")
@@ -180,7 +272,6 @@ def update_transactions_bulk(df_updates):
 
     upd = df_updates.copy()
     upd["id"] = pd.to_numeric(upd["id"], errors="coerce").fillna(0).astype(int)
-    upd["paid"] = upd["paid"].apply(lambda x: 1 if bool(x) else 0)
 
     with ENGINE.begin() as conn:
         for _, r in upd.iterrows():
@@ -202,14 +293,14 @@ def update_transactions_bulk(df_updates):
                     "type": str(r.get("type","")).strip().lower(),
                     "amount": float(r.get("amount", 0.0)),
                     "category": (str(r.get("category","")).strip() or "Outros"),
-                    "paid": int(r.get("paid", 0)),
+                    "paid": _paid_to_db(r.get("paid", False)),
                 },
             )
     _invalidate_cache()
 
-# =========================
+# ==========================================
 # AJUSTES DO FLUXO
-# =========================
+# ==========================================
 def add_cashflow_adjustment(date_, amount, description=None):
     with ENGINE.begin() as conn:
         conn.execute(
@@ -221,7 +312,7 @@ def add_cashflow_adjustment(date_, amount, description=None):
                 "date": str(date_),
                 "amount": float(amount),
                 "description": (description or "").strip(),
-                "created_at": _now_iso(),
+                "created_at": _now_sqlite_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
             },
         )
     _invalidate_cache()
@@ -252,15 +343,15 @@ def delete_cashflow_adjustment(adj_id):
         conn.execute(text("DELETE FROM cashflow_adjustments WHERE id = :id"), {"id": adj_id})
     _invalidate_cache()
 
-# =========================
+# ==========================================
 # DÍVIDAS
-# =========================
+# ==========================================
 def add_debt(credor, descricao, valor, vencimento, prioridade):
     with ENGINE.begin() as conn:
         conn.execute(
             text("""
             INSERT INTO debts (creditor, description, amount, due_date, priority, paid, created_at)
-            VALUES (:credor, :descricao, :valor, :venc, :prio, 0, :created_at)
+            VALUES (:credor, :descricao, :valor, :venc, :prio, :paid, :created_at)
             """),
             {
                 "credor": str(credor).strip(),
@@ -268,7 +359,8 @@ def add_debt(credor, descricao, valor, vencimento, prioridade):
                 "valor": float(valor),
                 "venc": None if not vencimento else str(vencimento),
                 "prio": int(prioridade),
-                "created_at": _now_iso(),
+                "paid": _paid_to_db(False),
+                "created_at": _now_sqlite_iso() if DB_KIND == "sqlite" else datetime.utcnow(),
             },
         )
     _invalidate_cache()
@@ -280,11 +372,14 @@ def fetch_debts(show_quitadas=False):
       FROM debts
     """
     if not show_quitadas:
-        q += " WHERE paid = 0"
+        q += " WHERE paid = :p0"
     q += " ORDER BY priority ASC, COALESCE(due_date,'9999-12-31') ASC, id DESC"
 
     with ENGINE.connect() as conn:
-        df = pd.read_sql(text(q), conn)
+        if not show_quitadas:
+            df = pd.read_sql(text(q), conn, params={"p0": _paid_to_db(False)})
+        else:
+            df = pd.read_sql(text(q), conn)
 
     if df.empty:
         return pd.DataFrame(columns=["id","creditor","description","amount","due_date","priority","paid","created_at"])
@@ -292,7 +387,7 @@ def fetch_debts(show_quitadas=False):
     df["id"] = pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int)
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
     df["priority"] = pd.to_numeric(df["priority"], errors="coerce").fillna(1).astype(int)
-    df["paid"] = pd.to_numeric(df["paid"], errors="coerce").fillna(0).astype(int)
+    df["paid"] = df["paid"].apply(_paid_from_db)
     return df
 
 def mark_debt_paid(debt_id, paid):
@@ -300,7 +395,7 @@ def mark_debt_paid(debt_id, paid):
     with ENGINE.begin() as conn:
         conn.execute(
             text("UPDATE debts SET paid = :paid WHERE id = :id"),
-            {"paid": 1 if paid else 0, "id": debt_id},
+            {"paid": _paid_to_db(paid), "id": debt_id},
         )
     _invalidate_cache()
 
@@ -310,9 +405,9 @@ def delete_debt(debt_id):
         conn.execute(text("DELETE FROM debts WHERE id = :id"), {"id": debt_id})
     _invalidate_cache()
 
-# =========================
+# ==========================================
 # DESAFIO v2
-# =========================
+# ==========================================
 def _min_n_for_target(target):
     target = float(target)
     if target <= 0:
@@ -333,13 +428,13 @@ def set_savings_goal_v2(target_amount, due_date):
         )
 
         existing = pd.read_sql(text("SELECT n, done FROM savings_deposits_v2"), conn)
-        existing_map = {int(r["n"]): int(r["done"]) for _, r in existing.iterrows()} if not existing.empty else {}
+        existing_map = {int(r["n"]): _paid_from_db(r["done"]) for _, r in existing.iterrows()} if not existing.empty else {}
 
         conn.execute(text("DELETE FROM savings_deposits_v2"))
         for i in range(1, n + 1):
             conn.execute(
                 text("INSERT INTO savings_deposits_v2 (n, done) VALUES (:n, :done)"),
-                {"n": i, "done": existing_map.get(i, 0)},
+                {"n": i, "done": _paid_to_db(existing_map.get(i, 0))},
             )
 
         conn.execute(text("DELETE FROM savings_overrides_v2 WHERE n > :n"), {"n": n})
@@ -365,7 +460,7 @@ def fetch_savings_deposits_v2_with_amount():
         return pd.DataFrame(columns=["n","done","amount"])
 
     dep["n"] = pd.to_numeric(dep["n"], errors="coerce").fillna(0).astype(int)
-    dep["done"] = pd.to_numeric(dep["done"], errors="coerce").fillna(0).astype(int)
+    dep["done"] = dep["done"].apply(_paid_from_db)
 
     if ov.empty:
         dep["amount"] = dep["n"].astype(float)
@@ -383,7 +478,7 @@ def toggle_savings_deposit_v2(n, done):
     with ENGINE.begin() as conn:
         conn.execute(
             text("UPDATE savings_deposits_v2 SET done = :done WHERE n = :n"),
-            {"done": 1 if done else 0, "n": n},
+            {"done": _paid_to_db(done), "n": n},
         )
     _invalidate_cache()
 
@@ -405,7 +500,7 @@ def set_savings_override_v2(n, amount):
 
 def reset_savings_marks_v2():
     with ENGINE.begin() as conn:
-        conn.execute(text("UPDATE savings_deposits_v2 SET done = 0"))
+        conn.execute(text("UPDATE savings_deposits_v2 SET done = :d"), {"d": _paid_to_db(False)})
         conn.execute(text("DELETE FROM savings_tx_link_v2"))
     _invalidate_cache()
 
@@ -415,41 +510,4 @@ def clear_savings_goal_v2():
         conn.execute(text("DELETE FROM savings_deposits_v2"))
         conn.execute(text("DELETE FROM savings_overrides_v2"))
         conn.execute(text("DELETE FROM savings_tx_link_v2"))
-    _invalidate_cache()
-
-def create_desafio_transaction(date_, n, amount):
-    n = int(n)
-    with ENGINE.begin() as conn:
-        row = conn.execute(text("SELECT tx_id FROM savings_tx_link_v2 WHERE n=:n"), {"n": n}).fetchone()
-        if row and row[0]:
-            return int(row[0])
-
-        conn.execute(
-            text("""
-            INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
-            VALUES (:date, :desc, 'entrada', :amount, 'Desafio', 1, :created_at)
-            """),
-            {"date": str(date_), "desc": f"Desafio - Depósito #{n}", "amount": float(amount), "created_at": _now_iso()},
-        )
-        tx_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
-
-        conn.execute(
-            text("""
-            INSERT INTO savings_tx_link_v2 (n, tx_id)
-            VALUES (:n, :tx_id)
-            ON CONFLICT(n) DO UPDATE SET tx_id=excluded.tx_id
-            """),
-            {"n": n, "tx_id": int(tx_id)},
-        )
-
-    _invalidate_cache()
-    return int(tx_id)
-
-def delete_desafio_transaction(n):
-    n = int(n)
-    with ENGINE.begin() as conn:
-        row = conn.execute(text("SELECT tx_id FROM savings_tx_link_v2 WHERE n=:n"), {"n": n}).fetchone()
-        if row and row[0]:
-            conn.execute(text("DELETE FROM transactions WHERE id=:id"), {"id": int(row[0])})
-        conn.execute(text("DELETE FROM savings_tx_link_v2 WHERE n=:n"), {"n": n})
     _invalidate_cache()
