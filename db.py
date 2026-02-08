@@ -5,6 +5,37 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
+
+# Se quiser forçar SQLite (pra testar), coloque FORCE_SQLITE=1 no Secrets
+FORCE_SQLITE = (os.getenv("FORCE_SQLITE") or st.secrets.get("FORCE_SQLITE", "")).strip() == "1"
+
+DATABASE_URL = (os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")).strip()
+
+def _make_engine():
+    # Força SQLite (debug)
+    if FORCE_SQLITE:
+        db_path = os.environ.get("FIN_DB_PATH", "financas.db")
+        return create_engine(f"sqlite:///{db_path}", future=True), "sqlite"
+
+    # Só aceita Postgres se a URL for válida
+    if DATABASE_URL.startswith(("postgresql://", "postgres://")):
+        return create_engine(
+            DATABASE_URL,
+            pool_pre_ping=True,
+            pool_recycle=300,
+            connect_args={"sslmode": "require"},
+            future=True,
+        ), "postgres"
+
+    # Fallback SQLite
+    db_path = os.environ.get("FIN_DB_PATH", "financas.db")
+    return create_engine(f"sqlite:///{db_path}", future=True), "sqlite"
+
+ENGINE, DB_KIND = _make_engine()
+
+def db_kind():
+    return DB_KIND
+
 # =========================
 # DATABASE URL (Neon / qualquer Postgres)
 # =========================
