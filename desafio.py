@@ -26,7 +26,7 @@ def render_desafio(data_padrao: date):
     st.title("🎯 Desafio (depósitos 1..N)")
     st.caption("Crie uma meta e marque depósitos. Clica e fica verde na hora ✅")
 
-    conectar = st.toggle("Conectar com lançamentos (criar entrada no caixa)", value=False)
+    conectar = st.toggle("Conectar com lançamentos (criar SAÍDA no caixa como investimento)", value=False)
 
     target_amount, due_date, n_deposits = get_savings_goal_v2()
 
@@ -131,6 +131,7 @@ def render_desafio(data_padrao: date):
                 if conectar:
                     if new_val is True:
                         amount = float(amount_map.get(n, n))
+                        # Agora cria uma SAÍDA (investimento), não inflando saldo
                         create_desafio_transaction(hoje, n, amount)
                     else:
                         delete_desafio_transaction(n)
