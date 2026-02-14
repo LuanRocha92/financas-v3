@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
+import altair as alt
 
 from db import (
     init_db,
@@ -17,10 +18,8 @@ from desafio import render_desafio
 st.set_page_config(page_title="Finanças", page_icon="💰", layout="wide")
 
 # DB init (Supabase/Postgres se tiver DATABASE_URL)
-
 import os
 st.sidebar.caption("DATABASE_URL set? " + ("SIM" if os.getenv("DATABASE_URL") else "NÃO"))
-
 
 init_db()
 ok, msg = ping_db()
@@ -38,6 +37,41 @@ def _style_pos_neg(v: float):
     except Exception:
         v = 0.0
     return "color:#ff4d4f; font-weight:700;" if v < 0 else "color:#22c55e; font-weight:700;"
+
+
+def _pie_chart_from_series(series: pd.Series, title: str):
+    """
+    Recebe uma Series (index=label, value=valor) e plota uma pizza via Altair.
+    """
+    if series is None or series.empty:
+        st.info("Sem dados para o gráfico.")
+        return
+
+    data = series.reset_index()
+    data.columns = ["label", "value"]
+    data["value"] = pd.to_numeric(data["value"], errors="coerce").fillna(0.0)
+
+    # Remove zeros pra não poluir a pizza
+    data = data[data["value"] > 0].copy()
+    if data.empty:
+        st.info("Sem valores positivos para plotar.")
+        return
+
+    chart = (
+        alt.Chart(data)
+        .mark_arc()
+        .encode(
+            theta=alt.Theta(field="value", type="quantitative"),
+            color=alt.Color(field="label", type="nominal", legend=alt.Legend(title="")),
+            tooltip=[
+                alt.Tooltip("label:N", title="Categoria"),
+                alt.Tooltip("value:Q", title="Valor", format=",.2f"),
+            ],
+        )
+        .properties(title=title, height=320)
+    )
+
+    st.altair_chart(chart, use_container_width=True)
 
 
 # Sidebar
@@ -128,14 +162,33 @@ if pagina == "💰 Visão Geral":
         a4.metric("Saldo líquido (7 dias)", fmt_brl(net7))
 
     st.divider()
-    st.subheader("📌 Gastos por categoria (período)")
 
-    gastos = df[df["type"] == "saida"].copy() if not df.empty else pd.DataFrame()
-    if gastos.empty:
-        st.info("Sem gastos no período.")
+    st.subheader("📌 Distribuição por categoria (período)")
+
+    if df.empty:
+        st.info("Sem dados no período.")
     else:
-        cat = gastos.groupby("category")["amount"].sum().sort_values(ascending=False)
-        st.bar_chart(cat, use_container_width=True)
+        col1, col2 = st.columns(2)
+
+        # Saídas -> pizza
+        with col1:
+            st.markdown("### 🍕 Saídas por categoria")
+            gastos = df[df["type"] == "saida"].copy()
+            if gastos.empty:
+                st.info("Sem saídas no período.")
+            else:
+                cat_out = gastos.groupby("category")["amount"].sum().sort_values(ascending=False)
+                _pie_chart_from_series(cat_out, "Saídas por categoria")
+
+        # Entradas -> pizza (NOVO)
+        with col2:
+            st.markdown("### 🍕 Entradas por categoria")
+            inc = df[df["type"] == "entrada"].copy()
+            if inc.empty:
+                st.info("Sem entradas no período.")
+            else:
+                cat_in = inc.groupby("category")["amount"].sum().sort_values(ascending=False)
+                _pie_chart_from_series(cat_in, "Entradas por categoria")
 
 # =========================
 # 🧾 LANÇAMENTOS
