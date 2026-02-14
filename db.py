@@ -1,4 +1,3 @@
-# db.py
 import os
 from datetime import datetime
 import pandas as pd
@@ -6,10 +5,14 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 
 
-# Se quiser forçar SQLite (pra testar), coloque FORCE_SQLITE=1 no Secrets
-FORCE_SQLITE = (os.getenv("FORCE_SQLITE") or st.secrets.get("FORCE_SQLITE", "")).strip() == "1"
+def _now_iso():
+    return datetime.utcnow().isoformat(timespec="seconds")
 
+
+# Se quiser forçar SQLite (pra testar), coloque FORCE_SQLITE=1 no Secrets/ENV
+FORCE_SQLITE = (os.getenv("FORCE_SQLITE") or st.secrets.get("FORCE_SQLITE", "")).strip() == "1"
 DATABASE_URL = (os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")).strip()
+
 
 def _make_engine():
     # Força SQLite (debug)
@@ -17,7 +20,7 @@ def _make_engine():
         db_path = os.environ.get("FIN_DB_PATH", "financas.db")
         return create_engine(f"sqlite:///{db_path}", future=True), "sqlite"
 
-    # Só aceita Postgres se a URL for válida
+    # Postgres (Neon/Supabase/etc)
     if DATABASE_URL.startswith(("postgresql://", "postgres://")):
         return create_engine(
             DATABASE_URL,
@@ -31,40 +34,13 @@ def _make_engine():
     db_path = os.environ.get("FIN_DB_PATH", "financas.db")
     return create_engine(f"sqlite:///{db_path}", future=True), "sqlite"
 
+
 ENGINE, DB_KIND = _make_engine()
+
 
 def db_kind():
     return DB_KIND
 
-# =========================
-# DATABASE URL (Neon / qualquer Postgres)
-# =========================
-DATABASE_URL = (
-    os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")
-).strip()
-
-def _make_engine():
-    # Postgres (Neon etc.)
-    if DATABASE_URL:
-        return create_engine(
-            DATABASE_URL,
-            pool_pre_ping=True,
-            pool_recycle=300,
-            connect_args={"sslmode": "require"},
-            future=True,
-        ), "postgres"
-
-    # Fallback local: SQLite
-    db_path = os.environ.get("FIN_DB_PATH", "financas.db")
-    return create_engine(f"sqlite:///{db_path}", future=True), "sqlite"
-
-ENGINE, DB_KIND = _make_engine()
-
-def db_kind():
-    return DB_KIND
-
-def _now_iso():
-    return datetime.utcnow().isoformat(timespec="seconds")
 
 def _invalidate_cache():
     for fn in [
@@ -79,6 +55,7 @@ def _invalidate_cache():
         except Exception:
             pass
 
+
 def ping_db():
     try:
         with ENGINE.connect() as conn:
@@ -87,16 +64,19 @@ def ping_db():
     except Exception as e:
         return False, str(e)
 
+
 # paid compat
 def _paid_to_db(paid):
     if DB_KIND == "postgres":
         return bool(paid)
     return 1 if bool(paid) else 0
 
+
 def _paid_from_db(v):
     if DB_KIND == "postgres":
         return 1 if bool(v) else 0
     return int(v) if v is not None else 0
+
 
 # =========================
 # INIT DB
@@ -245,6 +225,7 @@ def init_db():
             );
             """))
 
+
 # =========================
 # TRANSACTIONS
 # =========================
@@ -269,6 +250,7 @@ def add_transaction(date_, description, ttype, amount, category, paid):
             },
         )
     _invalidate_cache()
+
 
 @st.cache_data(show_spinner=False, ttl=10)
 def fetch_transactions(date_start=None, date_end=None):
@@ -296,12 +278,14 @@ def fetch_transactions(date_start=None, date_end=None):
     df["id"] = pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int)
     return df
 
+
 def delete_transaction(tx_id):
     tx_id = int(tx_id)
     with ENGINE.begin() as conn:
         conn.execute(text("DELETE FROM savings_tx_link_v2 WHERE tx_id = :tx_id"), {"tx_id": tx_id})
         conn.execute(text("DELETE FROM transactions WHERE id = :id"), {"id": tx_id})
     _invalidate_cache()
+
 
 def update_transactions_bulk(df_updates):
     if df_updates is None or df_updates.empty:
@@ -335,6 +319,7 @@ def update_transactions_bulk(df_updates):
             )
     _invalidate_cache()
 
+
 # =========================
 # AJUSTES DO FLUXO
 # =========================
@@ -353,6 +338,7 @@ def add_cashflow_adjustment(date_, amount, description=None):
             },
         )
     _invalidate_cache()
+
 
 @st.cache_data(show_spinner=False, ttl=10)
 def fetch_cashflow_adjustments(date_start, date_end):
@@ -374,11 +360,13 @@ def fetch_cashflow_adjustments(date_start, date_end):
     df["date"] = df["date"].astype(str)
     return df
 
+
 def delete_cashflow_adjustment(adj_id):
     adj_id = int(adj_id)
     with ENGINE.begin() as conn:
         conn.execute(text("DELETE FROM cashflow_adjustments WHERE id = :id"), {"id": adj_id})
     _invalidate_cache()
+
 
 # =========================
 # DÍVIDAS
@@ -401,6 +389,7 @@ def add_debt(credor, descricao, valor, vencimento, prioridade):
             },
         )
     _invalidate_cache()
+
 
 @st.cache_data(show_spinner=False, ttl=10)
 def fetch_debts(show_quitadas=False):
@@ -427,6 +416,7 @@ def fetch_debts(show_quitadas=False):
     df["paid"] = df["paid"].apply(_paid_from_db)
     return df
 
+
 def mark_debt_paid(debt_id, paid):
     debt_id = int(debt_id)
     with ENGINE.begin() as conn:
@@ -436,11 +426,13 @@ def mark_debt_paid(debt_id, paid):
         )
     _invalidate_cache()
 
+
 def delete_debt(debt_id):
     debt_id = int(debt_id)
     with ENGINE.begin() as conn:
         conn.execute(text("DELETE FROM debts WHERE id = :id"), {"id": debt_id})
     _invalidate_cache()
+
 
 # =========================
 # DESAFIO v2
@@ -453,6 +445,7 @@ def _min_n_for_target(target):
     if n * (n + 1) / 2 < target:
         n += 1
     return max(1, n)
+
 
 def set_savings_goal_v2(target_amount, due_date):
     target_amount = float(target_amount)
@@ -479,6 +472,7 @@ def set_savings_goal_v2(target_amount, due_date):
 
     _invalidate_cache()
 
+
 @st.cache_data(show_spinner=False, ttl=10)
 def get_savings_goal_v2():
     with ENGINE.connect() as conn:
@@ -486,6 +480,7 @@ def get_savings_goal_v2():
     if not row:
         return None, None, None
     return row[0], (None if row[1] is None else str(row[1])), row[2]
+
 
 @st.cache_data(show_spinner=False, ttl=10)
 def fetch_savings_deposits_v2_with_amount():
@@ -510,6 +505,7 @@ def fetch_savings_deposits_v2_with_amount():
     merged["amount"] = merged["amount"].fillna(merged["n"].astype(float))
     return merged[["n","done","amount"]].sort_values("n")
 
+
 def toggle_savings_deposit_v2(n, done):
     n = int(n)
     with ENGINE.begin() as conn:
@@ -518,6 +514,7 @@ def toggle_savings_deposit_v2(n, done):
             {"done": _paid_to_db(done), "n": n},
         )
     _invalidate_cache()
+
 
 def set_savings_override_v2(n, amount):
     n = int(n)
@@ -535,6 +532,7 @@ def set_savings_override_v2(n, amount):
             )
     _invalidate_cache()
 
+
 def reset_savings_marks_v2():
     with ENGINE.begin() as conn:
         if DB_KIND == "postgres":
@@ -544,6 +542,7 @@ def reset_savings_marks_v2():
         conn.execute(text("DELETE FROM savings_tx_link_v2"))
     _invalidate_cache()
 
+
 def clear_savings_goal_v2():
     with ENGINE.begin() as conn:
         conn.execute(text("UPDATE savings_goal_v2 SET target_amount=NULL, due_date=NULL, n_deposits=NULL WHERE id=1"))
@@ -552,22 +551,42 @@ def clear_savings_goal_v2():
         conn.execute(text("DELETE FROM savings_tx_link_v2"))
     _invalidate_cache()
 
+
 def create_desafio_transaction(date_, n, amount):
+    """
+    IMPORTANTE:
+    - Antes criava como 'entrada' e isso inflava o saldo.
+    - Agora cria como 'saida' (investimento), categoria 'Desafio'.
+    - Funciona em Postgres e SQLite.
+    """
     n = int(n)
+
     with ENGINE.begin() as conn:
         row = conn.execute(text("SELECT tx_id FROM savings_tx_link_v2 WHERE n=:n"), {"n": n}).fetchone()
         if row and row[0]:
             return int(row[0])
 
-        conn.execute(
-            text("""
-            INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
-            VALUES (:date, :desc, 'entrada', :amount, 'Desafio', :paid, NOW())
-            """),
-            {"date": str(date_), "desc": f"Desafio - Depósito #{n}", "amount": float(amount), "paid": True},
-        )
+        desc = f"Desafio - Investimento #{n}"
+        created_at = _now_iso() if DB_KIND == "sqlite" else datetime.utcnow()
 
-        tx_id = conn.execute(text("SELECT currval(pg_get_serial_sequence('transactions','id'))")).scalar()
+        if DB_KIND == "postgres":
+            tx_id = conn.execute(
+                text("""
+                INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
+                VALUES (:date, :desc, 'saida', :amount, 'Desafio', :paid, NOW())
+                RETURNING id
+                """),
+                {"date": str(date_), "desc": desc, "amount": float(amount), "paid": True},
+            ).scalar()
+        else:
+            conn.execute(
+                text("""
+                INSERT INTO transactions (date, description, type, amount, category, paid, created_at)
+                VALUES (:date, :desc, 'saida', :amount, 'Desafio', :paid, :created_at)
+                """),
+                {"date": str(date_), "desc": desc, "amount": float(amount), "paid": _paid_to_db(True), "created_at": created_at},
+            )
+            tx_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
 
         conn.execute(
             text("""
@@ -580,6 +599,7 @@ def create_desafio_transaction(date_, n, amount):
 
     _invalidate_cache()
     return int(tx_id)
+
 
 def delete_desafio_transaction(n):
     n = int(n)
